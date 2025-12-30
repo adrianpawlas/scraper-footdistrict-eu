@@ -94,36 +94,63 @@ class FootDistrictScraper:
         logger.info(f"Scraping category page: {url}")
         self.driver.get(url)
 
-        # Wait for products to load
+        # Wait for page to load and scroll down to trigger lazy loading
         try:
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".product-item, .product-card, [data-product]"))
+            WebDriverWait(self.driver, 15).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
-        except:
-            logger.warning(f"No products found on {url}")
-            return []
+            # Scroll down to load more products
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+        except Exception as e:
+            logger.warning(f"Page load issue on {url}: {e}")
 
         # Extract product URLs
         soup = BeautifulSoup(self.driver.page_source, 'html.parser')
         product_urls = []
 
-        # Try different selectors for product links
+        # Debug: Save page source for inspection
+        with open('debug_page.html', 'w', encoding='utf-8') as f:
+            f.write(self.driver.page_source)
+        logger.info("Saved debug page to debug_page.html")
+
+        # Try different selectors for product links (more comprehensive)
         selectors = [
             'a[href*=".html"]',
             '.product-item a',
             '.product-card a',
-            '[data-product] a'
+            '[data-product] a',
+            '.product a',
+            '.item a',
+            '.product-link',
+            'a[href*="product"]',
+            'a[href*="/en/"]'
         ]
 
         for selector in selectors:
             links = soup.select(selector)
             for link in links:
                 href = link.get('href')
-                if href and re.match(PRODUCT_URL_PATTERN, urljoin(BASE_URL, href)):
+                if href:
                     full_url = urljoin(BASE_URL, href)
-                    if full_url not in self.processed_urls:
+                    # Check if it's a product URL pattern
+                    if re.match(PRODUCT_URL_PATTERN, full_url) and full_url not in self.processed_urls:
                         product_urls.append(full_url)
                         self.processed_urls.add(full_url)
+                        logger.info(f"Found product URL: {full_url}")
+
+        # Also try to find any links that contain product-like patterns
+        all_links = soup.find_all('a', href=True)
+        for link in all_links:
+            href = link.get('href')
+            if href and ('samba' in href.lower() or 'adidas' in href.lower() or 'nike' in href.lower()):
+                full_url = urljoin(BASE_URL, href)
+                if re.match(PRODUCT_URL_PATTERN, full_url) and full_url not in self.processed_urls:
+                    product_urls.append(full_url)
+                    self.processed_urls.add(full_url)
+                    logger.info(f"Found brand-specific product URL: {full_url}")
 
         logger.info(f"Found {len(product_urls)} product URLs on {url}")
         return list(set(product_urls))  # Remove duplicates
