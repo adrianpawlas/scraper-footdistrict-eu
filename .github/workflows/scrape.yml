@@ -1,0 +1,58 @@
+name: Daily Foot District Scraper
+
+on:
+  schedule:
+    # Run every day at midnight UTC (adjust timezone as needed)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allow manual runs
+    inputs:
+      timeout_hours:
+        description: 'Timeout in hours (default: 12)'
+        required: false
+        default: '12'
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Install Chrome
+      run: |
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
+        echo 'deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main' | tee /etc/apt/sources.list.d/google-chrome.list
+        apt-get update
+        apt-get install -y google-chrome-stable
+
+    - name: Override timeout if specified
+      if: github.event.inputs.timeout_hours
+      run: |
+        sed -i "s/TIMEOUT_HOURS = 12/TIMEOUT_HOURS = ${{ github.event.inputs.timeout_hours }}/g" config.py
+
+    - name: Run scraper
+      run: |
+        python run_scraper.py
+      env:
+        SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    - name: Upload logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: scraper-logs-${{ github.run_number }}
+        path: |
+          scraper.log
+          products_backup.json
