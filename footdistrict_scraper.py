@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class FootDistrictScraper:
-    def __init__(self):
+    def __init__(self, limit=None):
         # Initialize Supabase client
         try:
             self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -42,6 +42,7 @@ class FootDistrictScraper:
         self.embedding_model = None
         self.processor = None
         self.processed_urls = set()
+        self.limit = limit  # Maximum number of products to scrape
 
     def setup_driver(self):
         """Setup Chrome driver with advanced anti-detection measures"""
@@ -59,8 +60,8 @@ class FootDistrictScraper:
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
 
-        # More realistic user agent
-        options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        # More realistic user agent (matching Windows since user is on Windows)
+        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
         # Additional stealth options
         options.add_argument("--disable-extensions")
@@ -97,11 +98,11 @@ class FootDistrictScraper:
             "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         })
 
-        # Set other navigator properties to look more human
+        # Set other navigator properties to look more human (Windows)
         stealth_js = """
         Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
         Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-        Object.defineProperty(navigator, 'platform', {get: () => 'Linux x86_64'});
+        Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
 
         // Override webdriver property more thoroughly
         delete window.navigator.__proto__.webdriver;
@@ -109,6 +110,8 @@ class FootDistrictScraper:
         // Add some realistic browser properties
         Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
         Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+        Object.defineProperty(navigator, 'cookieEnabled', {get: () => true});
+        Object.defineProperty(navigator, 'onLine', {get: () => true});
         """
         self.driver.execute_script(stealth_js)
 
@@ -244,19 +247,49 @@ class FootDistrictScraper:
         # Navigate to page
         self.driver.get(url)
 
-        # Handle Cloudflare challenge with longer wait
+        # Handle Cloudflare challenge with multiple attempts
         logger.info("Checking for Cloudflare challenge...")
         challenge_detected = self.is_cloudflare_challenge_present()
 
         if challenge_detected:
-            logger.info("Cloudflare challenge detected - waiting longer for resolution...")
-            time.sleep(30)  # Give it 30 seconds to resolve
+            logger.info("Cloudflare challenge detected - attempting to resolve...")
 
-            # Check again
+            # Try multiple strategies to resolve the challenge
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                logger.info(f"Attempt {attempt + 1}/{max_attempts} to resolve challenge...")
+
+                # Strategy 1: Wait and refresh
+                if attempt == 0:
+                    time.sleep(20)  # Wait 20 seconds
+                    self.driver.refresh()  # Refresh the page
+                    time.sleep(10)
+
+                # Strategy 2: Click somewhere and wait
+                elif attempt == 1:
+                    try:
+                        # Try to click on the body or any clickable element
+                        body = self.driver.find_element(By.TAG_NAME, "body")
+                        body.click()
+                        time.sleep(15)
+                    except:
+                        time.sleep(15)
+
+                # Strategy 3: Just wait longer
+                elif attempt == 2:
+                    time.sleep(45)  # Wait 45 seconds total
+
+                # Check if challenge is resolved
+                if not self.is_cloudflare_challenge_present():
+                    logger.info(f"Cloudflare challenge resolved on attempt {attempt + 1}!")
+                    break
+                else:
+                    logger.warning(f"Challenge still present after attempt {attempt + 1}")
+
             if self.is_cloudflare_challenge_present():
-                logger.warning("Cloudflare challenge still present after wait - proceeding anyway")
+                logger.warning("Cloudflare challenge persists - proceeding anyway (page might still work)")
             else:
-                logger.info("Cloudflare challenge resolved!")
+                logger.info("Cloudflare challenge successfully resolved!")
         else:
             logger.info("No Cloudflare challenge detected")
 
@@ -273,15 +306,23 @@ class FootDistrictScraper:
             # Move mouse randomly
             from selenium.webdriver.common.action_chains import ActionChains
             actions = ActionChains(self.driver)
-            actions.move_by_offset(100, 100).perform()
-            time.sleep(0.5)
-            actions.move_by_offset(-50, -50).perform()
-            time.sleep(0.5)
+
+            # More realistic human behavior
+            for i in range(5):
+                x_offset = (i % 2) * 200 - 100  # Alternate left/right
+                y_offset = (i // 2) * 150  # Move down gradually
+                actions.move_by_offset(x_offset, y_offset).perform()
+                time.sleep(0.3 + (i * 0.2))  # Increasing delays
 
             # Scroll down slowly to trigger lazy loading
-            for i in range(3):
-                self.driver.execute_script(f"window.scrollTo(0, {i * 800});")
-                time.sleep(1 + (i * 0.5))  # Increasing delays
+            for i in range(5):
+                scroll_amount = (i + 1) * 300
+                self.driver.execute_script(f"window.scrollTo(0, {scroll_amount});")
+                time.sleep(0.8 + (i * 0.3))  # Increasing delays
+
+            # Scroll back up a bit (human behavior)
+            self.driver.execute_script("window.scrollTo(0, 200);")
+            time.sleep(1)
 
         except Exception as e:
             logger.warning(f"Human-like behavior failed: {e}")
@@ -297,8 +338,8 @@ class FootDistrictScraper:
 
         # Check if we're still on a Cloudflare challenge page
         if "challenge" in self.driver.current_url or "Just a moment" in soup.get_text():
-            logger.error("Still on Cloudflare challenge page - cannot proceed")
-            return []
+            logger.warning("Cloudflare challenge still present - proceeding anyway")
+            # Don't return empty list - try to find products anyway
 
         # Try different selectors for product links (more comprehensive)
         selectors = [
@@ -356,10 +397,10 @@ class FootDistrictScraper:
 
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
 
-            # Check if we're still on a Cloudflare challenge page
-            if "challenge" in self.driver.current_url or "Just a moment" in soup.get_text():
-                logger.error(f"Still on Cloudflare challenge page for product: {url}")
-                return None
+        # Check if we're still on a Cloudflare challenge page
+        if "challenge" in self.driver.current_url or "Just a moment" in soup.get_text():
+            logger.warning(f"Cloudflare challenge still present for product: {url} - proceeding anyway")
+            # Don't return None - try to scrape anyway as the page might still work
 
             # Extract basic information
             title = self.extract_title(soup)
@@ -616,22 +657,41 @@ class FootDistrictScraper:
 
             logger.info(f"Total product URLs found: {len(all_product_urls)}")
 
+            # Apply limit if specified
+            if self.limit:
+                all_product_urls = all_product_urls[:self.limit]
+                logger.info(f"Limited to {len(all_product_urls)} products for testing")
+
             # Process products in batches
+            products_processed = 0
             for i in range(0, len(all_product_urls), BATCH_SIZE):
                 batch_urls = all_product_urls[i:i + BATCH_SIZE]
                 products = []
 
                 for url in batch_urls:
+                    if self.limit and products_processed >= self.limit:
+                        break
+
                     product_data = self.scrape_product_page(url)
                     if product_data:
                         products.append(product_data)
+                        products_processed += 1
+
+                        if self.limit and products_processed >= self.limit:
+                            logger.info(f"Reached product limit of {self.limit}")
+                            break
+
                     time.sleep(REQUEST_DELAY)
 
                 # Save batch to database
                 if products:
                     await self.save_to_supabase(products)
 
-                logger.info(f"Processed batch {i//BATCH_SIZE + 1}/{(len(all_product_urls) + BATCH_SIZE - 1)//BATCH_SIZE}")
+                logger.info(f"Processed batch {i//BATCH_SIZE + 1}/{(len(all_product_urls) + BATCH_SIZE - 1)//BATCH_SIZE}, total products: {products_processed}")
+
+                # Break if we've reached the limit
+                if self.limit and products_processed >= self.limit:
+                    break
 
         finally:
             if self.driver:
