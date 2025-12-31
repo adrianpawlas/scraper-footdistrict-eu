@@ -29,7 +29,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 class FootDistrictScraper:
-    def __init__(self):
+    def __init__(self, limit=None):
         # Initialize Supabase client
         try:
             self.supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -42,6 +42,7 @@ class FootDistrictScraper:
         self.embedding_model = None
         self.processor = None
         self.processed_urls = set()
+        self.limit = limit  # Maximum number of products to scrape
 
     def setup_driver(self):
         """Setup Chrome driver with anti-detection measures"""
@@ -423,22 +424,41 @@ class FootDistrictScraper:
 
             logger.info(f"Total product URLs found: {len(all_product_urls)}")
 
+            # Apply limit if specified
+            if self.limit:
+                all_product_urls = all_product_urls[:self.limit]
+                logger.info(f"Limited to {len(all_product_urls)} products for testing")
+
             # Process products in batches
+            products_processed = 0
             for i in range(0, len(all_product_urls), BATCH_SIZE):
                 batch_urls = all_product_urls[i:i + BATCH_SIZE]
                 products = []
 
                 for url in batch_urls:
+                    if self.limit and products_processed >= self.limit:
+                        break
+
                     product_data = self.scrape_product_page(url)
                     if product_data:
                         products.append(product_data)
+                        products_processed += 1
+
+                        if self.limit and products_processed >= self.limit:
+                            logger.info(f"Reached product limit of {self.limit}")
+                            break
+
                     time.sleep(REQUEST_DELAY)
 
                 # Save batch to database
                 if products:
                     await self.save_to_supabase(products)
 
-                logger.info(f"Processed batch {i//BATCH_SIZE + 1}/{(len(all_product_urls) + BATCH_SIZE - 1)//BATCH_SIZE}")
+                logger.info(f"Processed batch {i//BATCH_SIZE + 1}/{(len(all_product_urls) + BATCH_SIZE - 1)//BATCH_SIZE}, total products: {products_processed}")
+
+                # Break if we've reached the limit
+                if self.limit and products_processed >= self.limit:
+                    break
 
         finally:
             if self.driver:

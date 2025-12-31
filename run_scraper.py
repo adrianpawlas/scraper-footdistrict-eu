@@ -2,8 +2,10 @@
 """
 Foot District Scraper Runner
 Run this script to start scraping Foot District products.
+Usage: python run_scraper.py [--limit N]
 """
 
+import argparse
 import asyncio
 import logging
 from footdistrict_scraper import FootDistrictScraper
@@ -18,9 +20,15 @@ logging.basicConfig(
     ]
 )
 
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='Foot District Scraper')
+parser.add_argument('--limit', type=int, default=None,
+                   help='Limit the number of products to scrape (default: no limit)')
+args = parser.parse_args()
+
 async def main():
     """Main runner function"""
-    scraper = FootDistrictScraper()
+    scraper = FootDistrictScraper(limit=args.limit)
 
     try:
         await scraper.run_scraper_with_timeout()
