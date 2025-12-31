@@ -65,10 +65,23 @@ class FootDistrictScraper:
         # Additional stealth options
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-plugins")
-        options.add_argument("--disable-images")  # Speed up loading
-        options.add_argument("--disable-javascript")  # Wait, we need JS for Cloudflare
         options.add_argument("--disable-web-security")
         options.add_argument("--allow-running-insecure-content")
+        options.add_argument("--disable-features=VizDisplayCompositor")
+        options.add_argument("--disable-ipc-flooding-protection")
+
+        # Language and locale
+        options.add_argument("--lang=en-US,en")
+        options.add_argument("--accept-lang=en-US,en")
+
+        # Disable various automation indicators
+        options.add_experimental_option("prefs", {
+            "profile.managed_default_content_settings.images": 2,  # Block images for speed
+            "profile.default_content_setting_values.notifications": 2,
+            "profile.managed_default_content_settings.media_stream": 2,
+            "profile.password_manager_enabled": False,
+            "credentials_enable_service": False,
+        })
 
         # Use service to specify driver path
         from selenium.webdriver.chrome.service import Service
@@ -88,35 +101,112 @@ class FootDistrictScraper:
         stealth_js = """
         Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
         Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+        Object.defineProperty(navigator, 'platform', {get: () => 'Linux x86_64'});
+
+        // Override webdriver property more thoroughly
+        delete window.navigator.__proto__.webdriver;
+
+        // Add some realistic browser properties
+        Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+        Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
         """
         self.driver.execute_script(stealth_js)
 
-    def wait_for_cloudflare_challenge(self, timeout=30):
-        """Wait for Cloudflare challenge to complete"""
+        # Add realistic cookies that a regular browser would have
         try:
-            # Wait for the challenge to appear
-            WebDriverWait(self.driver, 10).until(
-                lambda driver: "challenge" in driver.current_url or
-                              "cf-browser-verification" in driver.page_source or
-                              "Verify you are human" in driver.page_source or
-                              "Just a moment" in driver.page_source
-            )
+            self.driver.get("https://footdistrict.com")
+            time.sleep(3)  # Let initial cookies be set
+            self.driver.delete_all_cookies()  # Clear any automation cookies
 
-            logger.info("Cloudflare challenge detected, waiting for completion...")
-
-            # Wait for challenge to complete (page to load normally)
-            WebDriverWait(self.driver, timeout).until(
-                lambda driver: "challenge" not in driver.current_url and
-                              "cf-browser-verification" not in driver.page_source and
-                              "Verify you are human" not in driver.page_source and
-                              "Just a moment" not in driver.page_source
-            )
-
-            logger.info("Cloudflare challenge completed successfully")
-            return True
+            # Add some realistic cookies
+            self.driver.add_cookie({
+                'name': '__cfduid',
+                'value': 'd1234567890123456789012345678901234567890',
+                'domain': '.footdistrict.com'
+            })
 
         except Exception as e:
-            logger.warning(f"Cloudflare challenge handling failed: {e}")
+            logger.warning(f"Cookie setup failed: {e}")
+
+    def is_cloudflare_challenge_present(self):
+        """Check if Cloudflare challenge is currently present"""
+        try:
+            current_url = self.driver.current_url
+            page_source = self.driver.page_source
+
+            return (
+                "challenge" in current_url or
+                "cf-browser-verification" in page_source or
+                "Verify you are human" in page_source or
+                "Just a moment" in page_source or
+                "cf-chl-widget" in page_source or
+                "turnstile" in page_source
+            )
+        except:
+            return True  # Assume challenge if we can't check
+
+    def wait_for_cloudflare_challenge(self, timeout=60):
+        """Wait for Cloudflare challenge to complete with better handling"""
+        try:
+            # Check if we're already on a challenge page
+            current_url = self.driver.current_url
+            page_source = self.driver.page_source
+
+            challenge_detected = (
+                "challenge" in current_url or
+                "cf-browser-verification" in page_source or
+                "Verify you are human" in page_source or
+                "Just a moment" in page_source or
+                "cf-chl-widget" in page_source
+            )
+
+            if challenge_detected:
+                logger.info("Cloudflare challenge detected, waiting for completion...")
+
+                # Add human-like behavior while waiting
+                try:
+                    # Move mouse around
+                    from selenium.webdriver.common.action_chains import ActionChains
+                    actions = ActionChains(self.driver)
+
+                    # Simulate human interaction
+                    for i in range(5):
+                        actions.move_by_offset(50, 50).perform()
+                        time.sleep(1)
+                        actions.move_by_offset(-25, -25).perform()
+                        time.sleep(0.5)
+
+                    # Try clicking somewhere neutral
+                    try:
+                        body = self.driver.find_element(By.TAG_NAME, "body")
+                        actions.move_to_element(body).click().perform()
+                        time.sleep(2)
+                    except:
+                        pass
+
+                except Exception as e:
+                    logger.warning(f"Human-like interaction failed: {e}")
+
+                # Wait for challenge to complete with longer timeout
+                try:
+                    WebDriverWait(self.driver, timeout).until(
+                        lambda driver: "challenge" not in driver.current_url and
+                                      "cf-browser-verification" not in driver.page_source and
+                                      "Verify you are human" not in driver.page_source and
+                                      "Just a moment" not in driver.page_source and
+                                      "cf-chl-widget" not in driver.page_source
+                    )
+                    logger.info("Cloudflare challenge completed successfully")
+                    return True
+                except:
+                    logger.warning(f"Cloudflare challenge did not complete within {timeout} seconds")
+                    return False
+            else:
+                logger.info("No Cloudflare challenge detected")
+                return True
+
+        except Exception as e:
+            logger.warning(f"Cloudflare challenge detection failed: {e}")
             return False
 
     def setup_embedding_model(self):
@@ -154,9 +244,21 @@ class FootDistrictScraper:
         # Navigate to page
         self.driver.get(url)
 
-        # Handle Cloudflare challenge
-        if not self.wait_for_cloudflare_challenge():
-            logger.warning("Cloudflare challenge may still be active")
+        # Handle Cloudflare challenge with longer wait
+        logger.info("Checking for Cloudflare challenge...")
+        challenge_detected = self.is_cloudflare_challenge_present()
+
+        if challenge_detected:
+            logger.info("Cloudflare challenge detected - waiting longer for resolution...")
+            time.sleep(30)  # Give it 30 seconds to resolve
+
+            # Check again
+            if self.is_cloudflare_challenge_present():
+                logger.warning("Cloudflare challenge still present after wait - proceeding anyway")
+            else:
+                logger.info("Cloudflare challenge resolved!")
+        else:
+            logger.info("No Cloudflare challenge detected")
 
         # Wait for page content to load
         try:
