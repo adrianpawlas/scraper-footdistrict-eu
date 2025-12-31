@@ -44,22 +44,80 @@ class FootDistrictScraper:
         self.processed_urls = set()
 
     def setup_driver(self):
-        """Setup Chrome driver with anti-detection measures"""
+        """Setup Chrome driver with advanced anti-detection measures"""
         options = Options()
+
+        # Basic options
         options.add_argument("--headless")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+
+        # Anti-detection measures
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
-        options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+        # More realistic user agent
+        options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+        # Additional stealth options
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-plugins")
+        options.add_argument("--disable-images")  # Speed up loading
+        options.add_argument("--disable-javascript")  # Wait, we need JS for Cloudflare
+        options.add_argument("--disable-web-security")
+        options.add_argument("--allow-running-insecure-content")
 
         # Use service to specify driver path
         from selenium.webdriver.chrome.service import Service
         service = Service(ChromeDriverManager().install())
 
         self.driver = webdriver.Chrome(service=service, options=options)
+
+        # Execute anti-detection scripts
         self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+        # Add more stealth
+        self.driver.execute_cdp_cmd('Network.setUserAgentOverride', {
+            "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        })
+
+        # Set other navigator properties to look more human
+        stealth_js = """
+        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+        """
+        self.driver.execute_script(stealth_js)
+
+    def wait_for_cloudflare_challenge(self, timeout=30):
+        """Wait for Cloudflare challenge to complete"""
+        try:
+            # Wait for the challenge to appear
+            WebDriverWait(self.driver, 10).until(
+                lambda driver: "challenge" in driver.current_url or
+                              "cf-browser-verification" in driver.page_source or
+                              "Verify you are human" in driver.page_source or
+                              "Just a moment" in driver.page_source
+            )
+
+            logger.info("Cloudflare challenge detected, waiting for completion...")
+
+            # Wait for challenge to complete (page to load normally)
+            WebDriverWait(self.driver, timeout).until(
+                lambda driver: "challenge" not in driver.current_url and
+                              "cf-browser-verification" not in driver.page_source and
+                              "Verify you are human" not in driver.page_source and
+                              "Just a moment" not in driver.page_source
+            )
+
+            logger.info("Cloudflare challenge completed successfully")
+            return True
+
+        except Exception as e:
+            logger.warning(f"Cloudflare challenge handling failed: {e}")
+            return False
 
     def setup_embedding_model(self):
         """Setup the image embedding model"""
@@ -90,22 +148,41 @@ class FootDistrictScraper:
         return urls
 
     def scrape_category_page(self, url: str) -> List[str]:
-        """Scrape a category page to get product URLs"""
+        """Scrape a category page to get product URLs with Cloudflare handling"""
         logger.info(f"Scraping category page: {url}")
+
+        # Navigate to page
         self.driver.get(url)
 
-        # Wait for page to load and scroll down to trigger lazy loading
+        # Handle Cloudflare challenge
+        if not self.wait_for_cloudflare_challenge():
+            logger.warning("Cloudflare challenge may still be active")
+
+        # Wait for page content to load
         try:
-            WebDriverWait(self.driver, 15).until(
+            WebDriverWait(self.driver, 20).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
-            # Scroll down to load more products
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(2)
         except Exception as e:
-            logger.warning(f"Page load issue on {url}: {e}")
+            logger.warning(f"Page load timeout on {url}: {e}")
+
+        # Add human-like behavior: random mouse movements and scrolling
+        try:
+            # Move mouse randomly
+            from selenium.webdriver.common.action_chains import ActionChains
+            actions = ActionChains(self.driver)
+            actions.move_by_offset(100, 100).perform()
+            time.sleep(0.5)
+            actions.move_by_offset(-50, -50).perform()
+            time.sleep(0.5)
+
+            # Scroll down slowly to trigger lazy loading
+            for i in range(3):
+                self.driver.execute_script(f"window.scrollTo(0, {i * 800});")
+                time.sleep(1 + (i * 0.5))  # Increasing delays
+
+        except Exception as e:
+            logger.warning(f"Human-like behavior failed: {e}")
 
         # Extract product URLs
         soup = BeautifulSoup(self.driver.page_source, 'html.parser')
@@ -115,6 +192,11 @@ class FootDistrictScraper:
         with open('debug_page.html', 'w', encoding='utf-8') as f:
             f.write(self.driver.page_source)
         logger.info("Saved debug page to debug_page.html")
+
+        # Check if we're still on a Cloudflare challenge page
+        if "challenge" in self.driver.current_url or "Just a moment" in soup.get_text():
+            logger.error("Still on Cloudflare challenge page - cannot proceed")
+            return []
 
         # Try different selectors for product links (more comprehensive)
         selectors = [
@@ -145,7 +227,7 @@ class FootDistrictScraper:
         all_links = soup.find_all('a', href=True)
         for link in all_links:
             href = link.get('href')
-            if href and ('samba' in href.lower() or 'adidas' in href.lower() or 'nike' in href.lower()):
+            if href and ('samba' in href.lower() or 'adidas' in href.lower() or 'nike' in href.lower() or 'yeezy' in href.lower()):
                 full_url = urljoin(BASE_URL, href)
                 if re.match(PRODUCT_URL_PATTERN, full_url) and full_url not in self.processed_urls:
                     product_urls.append(full_url)
@@ -156,17 +238,26 @@ class FootDistrictScraper:
         return list(set(product_urls))  # Remove duplicates
 
     def scrape_product_page(self, url: str) -> Optional[Dict]:
-        """Scrape individual product page for all data"""
+        """Scrape individual product page for all data with Cloudflare handling"""
         logger.info(f"Scraping product: {url}")
         try:
             self.driver.get(url)
 
+            # Handle Cloudflare challenge
+            if not self.wait_for_cloudflare_challenge():
+                logger.warning("Cloudflare challenge may still be active on product page")
+
             # Wait for product data to load
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".product-info, .product-details, h1"))
+            WebDriverWait(self.driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".product-info, .product-details, h1, [data-product-title]"))
             )
 
             soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+
+            # Check if we're still on a Cloudflare challenge page
+            if "challenge" in self.driver.current_url or "Just a moment" in soup.get_text():
+                logger.error(f"Still on Cloudflare challenge page for product: {url}")
+                return None
 
             # Extract basic information
             title = self.extract_title(soup)
